@@ -19,9 +19,7 @@ class MatchableExpression(ABC):
     """
     @abstractmethod
     def matches(self, doc: BSONDocument) -> bool:
-        pass
-    
-
+        raise NotImplementedError
 
 class MatchOperator(Enum):
     EQ = "$eq"
@@ -29,6 +27,8 @@ class MatchOperator(Enum):
     LT = "$lt"
     GTE = "$gte"
     GT = "$gt"
+    IN = "$in"
+    NIN = "$nin"
     REGEX = "$regex"
     NEAR = "$near"
     NEAR_SPHERE = "$nearSphere"
@@ -47,12 +47,33 @@ def defop(operator, arity, kw):
         return fn
     return res
 
+class TreeOperator(Enum):
+    AND = "$and"
+    OR = "$or"
+    NOR = "$nor"
+
+TreeOperatorEval = dict()
+
+def defTreeOp(op):
+    global TreeOperatorEval
+    def res(fn: Callable[[List, BSONDocument], bool]):
+        TreeOperatorEval[op] = fn
+        return fn
+    return res
+
+@dataclass
+class NotExpression(MatchableExpression):
+    expr: MatchableExpression
+
+    def matches(self, doc: BSONDocument) -> bool:
+        return not self.expr.matches(doc)
 
 @dataclass
 class Predicate:
     operator: MatchOperator
     argument: BSONElement
     namedArguments: Optional[Dict] = None
+
 
     def eval(self, elem: BSONElement) -> bool:
         return OperatorLogic.get(self.operator, const(False))(elem, self.argument, self.namedArguments)
@@ -131,46 +152,7 @@ class PathMatchExpression(MatchableExpression):
                        arr.elements),
                    start = [])
 
-@defop(MatchOperator.EQ, 1, None)
-def eq(elem: BSONElement, arg: BSONElement, _):
-    cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) == 0
-
-@defop(MatchOperator.LT, 1, None)
-def lt(elem: BSONElement, arg: BSONElement, _):
-    cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) < 0
-
-@defop(MatchOperator.GT, 1, None)
-def gt(elem: BSONElement, arg: BSONElement, _):
-    cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) > 0
-
-@defop(MatchOperator.LTE, 1, None)
-def lte(elem: BSONElement, arg: BSONElement, _):
-    cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) <= 0
-
-@defop(MatchOperator.GTE, 1, None)
-def gte(elem: BSONElement, arg: BSONElement, _):
-    cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) >= 0
-
 # Tree Operators
-
-class TreeOperator(Enum):
-    AND = "$and"
-    OR = "$or"
-    NOR = "$nor"
-
-TreeOperatorEval = dict()
-
-def defTreeOp(op):
-    global TreeOperatorEval
-    def res(fn: Callable[[List, BSONDocument], bool]):
-        TreeOperatorEval[op] = fn
-        return fn
-    return res
 
 @dataclass
 class TreeExpression(MatchableExpression):
@@ -200,3 +182,49 @@ def treeNOR(children: List, doc: BSONDocument) -> bool:
         if child.matches(doc):
             return False
     return True
+
+@defop(MatchOperator.EQ, 1, None)
+def eq(elem: BSONElement, arg: BSONElement, _):
+    cmpRes = BSONElement.compare(elem, arg)
+    return fromMaybe(None, cmpRes) == 0
+
+@defop(MatchOperator.LT, 1, None)
+def lt(elem: BSONElement, arg: BSONElement, _):
+    cmpRes = BSONElement.compare(elem, arg)
+    return fromMaybe(None, cmpRes) < 0
+
+@defop(MatchOperator.GT, 1, None)
+def gt(elem: BSONElement, arg: BSONElement, _):
+    cmpRes = BSONElement.compare(elem, arg)
+    return fromMaybe(None, cmpRes) > 0
+
+@defop(MatchOperator.LTE, 1, None)
+def lte(elem: BSONElement, arg: BSONElement, _):
+    cmpRes = BSONElement.compare(elem, arg)
+    return fromMaybe(None, cmpRes) <= 0
+
+@defop(MatchOperator.GTE, 1, None)
+def gte(elem: BSONElement, arg: BSONElement, _):
+    cmpRes = BSONElement.compare(elem, arg)
+    return fromMaybe(None, cmpRes) >= 0
+
+@defop(MatchOperator.IN, 1, None)
+def inOp(elem: BSONElement, arg: BSONElement, _):
+
+    # EOO matches NULL
+    if elem.bsonType == BSONType.EOO:
+        for aelm in arg.value.elements:
+            if aelm.bsonType == BSONType.Null:
+                return True
+
+    arr = arg.value.elements
+
+    for aelm in arr:
+        if aelm.bsonType == BSONType.Regex:
+            # TODO: implement Regex
+            continue
+        if fromMaybe(None, BSONElement.compare(elem, aelm)) == 0:
+            return True
+
+    return False
+

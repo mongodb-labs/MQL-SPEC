@@ -2,17 +2,26 @@ from fpy.parsec.parsec import parser
 from fpy.data.either import Left, Right, isLeft, isRight, fromLeft, fromRight, Either
 from fpy.composable.function import func
 from fpy.control.functor import fmap
-from typing import Any, List, Dict, Callable
-from mql.matchExpr.querySelector import MatchOperator, Predicate, PathMatchExpression, TreeOperator, TreeExpression, MatchableExpression, OperatorArity, OperatorKW
+from typing import Any, List, Dict, Callable, Optional
+from mql.matchExpr.querySelector import MatchOperator, Predicate, PathMatchExpression, TreeOperator, TreeExpression, MatchableExpression, OperatorArity, OperatorKW, NotExpression
 from mql.base.bson import BSONElement, BSONDocument, BSONType
 from mql.base.path import Path
 
-PathlessExpressions: Dict[str, Callable[[BSONElement], Either[Any, Any]]] = dict()
+PathlessExpressions: Dict[str, Callable[[BSONElement], Either[str, MatchableExpression]]] = dict()
 
-def defPathless(name):
+def defPathless(op: TreeOperator):
     global PathlessExpressions
     def res(fn):
-        PathlessExpressions[name] = fn
+        PathlessExpressions[op.value] = fn
+        return fn
+    return res
+
+MatchOperatorParser: Dict[str, Callable[[str, BSONElement, Optional[BSONDocument]], Either[str, MatchableExpression]]] = dict()
+
+def defMatchOp(op: MatchOperator):
+    global MatchOperatorParser
+    def res(fn):
+        MatchOperatorParser[op.value] = fn
         return fn
     return res
 
@@ -68,19 +77,19 @@ PredicateTopLevelExpr  := PathlessExpression
                 continue
             return matchFn
         if isExpressionDocument(elm, False):
-            subExprs = parseDocumentTopLevel(elm)
+            subExprs = parseDocumentTopLevel(elm.fieldName, elm)
             if isRight(subExprs):
                 childrenExpr.extend(fromRight([], subExprs))
                 continue
             return subExprs
         if elm.bsonType == BSONType.Regex:
-            regexExpr = parseRegexMatch(elm)
+            regexExpr = parseRegexMatch(elm.fieldName, elm)
             if isRight(regexExpr):
                 childrenExpr.append(fromRight(None, regexExpr))
                 continue
             return regexExpr
         # default case is field equality
-        eqExpr = parseImplicitEq(elm)
+        eqExpr = parseComparison(elm.fieldName, elm, MatchOperator.EQ)
         if isRight(eqExpr):
             childrenExpr.append(fromRight(None, eqExpr))
             continue
@@ -91,7 +100,7 @@ PredicateTopLevelExpr  := PathlessExpression
     return Right(TreeExpression(TreeOperator.AND, childrenExpr))
 
 
-def parsePathlessExpression(expr) -> Either[Any, Any]:
+def parsePathlessExpression(expr) -> Either[str, MatchableExpression]:
     """
 MatchExpr :=  And
             | Nor
@@ -105,7 +114,7 @@ MatchExpr :=  And
 
     return pathlessParser(expr)
 
-def parseDocumentTopLevel(expr: BSONElement) -> Either[str, List[MatchableExpression]]:
+def parseDocumentTopLevel(fieldName: str, expr: BSONElement) -> Either[str, List[MatchableExpression]]:
     """
     This loosely corresponds to parseSub with currentlevel = kUserDocumentTopLevel
     """
@@ -117,7 +126,7 @@ def parseDocumentTopLevel(expr: BSONElement) -> Either[str, List[MatchableExpres
 
     res = []
     for field in expr.value.elements:
-        parsedField = parseSubField(expr.fieldName, field)
+        parsedField = parseSubField(fieldName, field, expr.value)
         if isLeft(parsedField):
             return parsedField
         res.append(fromRight(None, parsedField))
@@ -125,49 +134,39 @@ def parseDocumentTopLevel(expr: BSONElement) -> Either[str, List[MatchableExpres
     return Right(res)
 
 
-def parseUserSubDocument(expr) -> Either[str, List[MatchableExpression]]:
-    pass
-
-def parseSubField(fieldPath: str, expr: BSONElement) -> Either[str, MatchableExpression]:
+def parseSubField(fieldPath: str, expr: BSONElement, ctx: Optional[BSONDocument]) -> Either[str, MatchableExpression]:
     if expr.fieldName == "$not":
         return parseSubNot(fieldPath, expr)
-    # print(f"operator: {expr.fieldName}")
-    exprOp = None
-    for op in MatchOperator:
-        if op.value == expr.fieldName:
-            exprOp = op
 
-    if exprOp is None:
-        return Left(f"Operator {expr.fieldName} is not defined")
+    opParser = MatchOperatorParser.get(expr.fieldName, None)
 
-    return Right(PathMatchExpression(Path.fromString(fieldPath), Predicate(exprOp, expr)))
-    
+    if opParser is None:
+        return Left(f"Parser for operator {expr.fieldName} is not defined")
 
-def parseSubNot(fieldPath: str, expr: BSONElement):
-    pass
+    return opParser(fieldPath, expr, ctx)
 
-def parseGeo(expr):
-    pass
+def parseSubNot(fieldPath: str, expr: BSONElement) -> Either[str, MatchableExpression]:
+    if expr.bsonType == BSONType.Regex:
+        return parseRegexMatch(fieldPath, expr) | NotExpression
+    if expr.bsonType != BSONType.Document:
+        return Left("$not must take a regex or object")
+    inner = parseDocumentTopLevel(fieldPath, expr)
+    return inner | (lambda x: NotExpression(TreeExpression(TreeOperator.AND, x)))
 
-def parseRegexMatch(expr) -> Either[str, MatchableExpression]:
+
+def parseGeo(expr) -> Either[str, MatchableExpression]:
+    return Left("geo is not yet implemented")
+
+def parseRegexMatch(fieldName: str, expr: BSONElement) -> Either[str, MatchableExpression]:
     """
     FieldName : Regex is equivalent to FieldName : {$regex: Regex}
     """
-    regexExpr = BSONElement(BSONType.Document, expr.fieldName, BSONDocument([BSONElement(BSONType.Regex, "$regex", expr.value)]))
+    regexExpr = BSONElement(BSONType.Document, fieldName, BSONDocument([BSONElement(BSONType.Regex, "$regex", expr.value)]))
     print(f"{regexExpr = }")
-    return parseSubField(expr.fieldName, regexExpr)
-
-def parseImplicitEq(expr):
-    return parseComparison(expr.fieldName, expr, MatchOperator.EQ)
-
-def parseComparison(fieldName: str, expr, operator) -> Either[str, MatchableExpression]:
-    if operator != MatchOperator.EQ and expr.bsonType == BSONType.Regex:
-        return Left("Regex can only appear in equality comparison")
-
-    return Right(PathMatchExpression(Path.fromString(fieldName), Predicate(operator, expr)))
+    return parseSubField(fieldName, regexExpr, None)
 
 
-def parseTopLevelLogical(opCtor):
+def parseTopLevelLogical(opCtor) -> Either[str, MatchableExpression]:
     def _res(expr: BSONElement) -> Either[Any, MatchableExpression]:
         if expr.bsonType != BSONType.Array:
             return Left("Top Level Logical Expression Must Take An Array")
@@ -185,6 +184,32 @@ def parseTopLevelLogical(opCtor):
         return Right(opCtor(children))
     return _res
 
-defPathless("$and")(parseTopLevelLogical(lambda children: TreeExpression(TreeOperator.AND, children)))
-defPathless("$or")(parseTopLevelLogical(lambda children: TreeExpression(TreeOperator.OR, children)))
-defPathless("$nor")(parseTopLevelLogical(lambda children: TreeExpression(TreeOperator.NOR, children)))
+def parseComparison(fieldName: str, expr, operator) -> Either[str, MatchableExpression]:
+    if operator != MatchOperator.EQ and expr.bsonType == BSONType.Regex:
+        return Left("Regex can only appear in equality comparison")
+
+    return Right(PathMatchExpression(Path.fromString(fieldName), Predicate(operator, expr)))
+
+def parseInArray(fieldName: str, expr: BSONElement) -> Either[str, MatchableExpression]:
+    if expr.bsonType != BSONType.Array:
+        return Left("$in must take an array")
+
+    for elm in expr.value.elements:
+        if isExpressionDocument(elm, False):
+            return Left("Cannot have $ operators within $in array")
+        # in server a separation of regex value and other literal values happens here
+        # but that shouldn't affect the semantics of an $in operator
+    return Right(PathMatchExpression(Path.fromString(fieldName), Predicate(MatchOperator.IN, expr)))
+
+
+defPathless(TreeOperator.AND)(parseTopLevelLogical(lambda children: TreeExpression(TreeOperator.AND, children)))
+defPathless(TreeOperator.OR)(parseTopLevelLogical(lambda children: TreeExpression(TreeOperator.OR, children)))
+defPathless(TreeOperator.NOR)(parseTopLevelLogical(lambda children: TreeExpression(TreeOperator.NOR, children)))
+
+defMatchOp(MatchOperator.EQ)(lambda fieldName, expr, _: parseComparison(fieldName, expr, MatchOperator.EQ))
+defMatchOp(MatchOperator.LTE)(lambda fieldName, expr, _: parseComparison(fieldName, expr, MatchOperator.LTE))
+defMatchOp(MatchOperator.LT)(lambda fieldName, expr, _: parseComparison(fieldName, expr, MatchOperator.LT))
+defMatchOp(MatchOperator.GT)(lambda fieldName, expr, _: parseComparison(fieldName, expr, MatchOperator.GT))
+defMatchOp(MatchOperator.GTE)(lambda fieldName, expr, _: parseComparison(fieldName, expr, MatchOperator.GTE))
+defMatchOp(MatchOperator.IN)(lambda fieldName, expr, _: parseInArray(fieldName, expr))
+defMatchOp(MatchOperator.NIN)(lambda fieldName, expr, _: parseInArray(fieldName, expr) | NotExpression)
