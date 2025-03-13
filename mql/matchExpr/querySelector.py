@@ -2,12 +2,13 @@ from __future__ import annotations
 
 
 from abc import ABC, abstractmethod
-from mql.base.bson import BSONDocument, BSONType, BSONElement,BSONArray
+from mql.base.bson import BSONValue, BSONDocument, BSONType, BSONElement, BSONArray
 from mql.base.path import Path
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Any, Callable, Generator, Dict, Optional
 from fpy.data.maybe import Maybe, isJust, fromMaybe, Nothing, Just, maybe, isNothing
+from fpy.data.function import constN, uncurryN
 from fpy.composable.function import func
 from fpy.debug.debug import showio
 from fpy.data.function import const
@@ -76,7 +77,7 @@ class Predicate:
 
 
     def eval(self, elem: BSONElement) -> bool:
-        return OperatorLogic.get(self.operator, const(False))(elem, self.argument, self.namedArguments)
+        return OperatorLogic.get(self.operator, uncurryN(3, constN(3, False)))(elem, self.argument, self.namedArguments)
 
 
 @dataclass
@@ -85,7 +86,7 @@ class PathMatchExpression(MatchableExpression):
     predicate: Predicate
 
     def matches(self, doc: BSONDocument) -> bool:
-        leafElms = PathMatchExpression.iterPath(self.path, BSONElement(BSONType.Document, "", doc))
+        leafElms = PathMatchExpression.iterPath(self.path, BSONElement("", BSONValue(BSONType.Document, doc)))
         for elem in leafElms:
             if self.predicate.eval(elem):
                 return True
@@ -95,31 +96,31 @@ class PathMatchExpression(MatchableExpression):
     @staticmethod
     def iterPath(path: Path, doc: BSONElement) -> List[BSONElement]:
         
-        if not doc:
+        if not doc or doc.value.bsonType == BSONType.EOO:
             return []
         if not path:
             return [doc]
     
-        if path and doc.bsonType not in [BSONType.Array, BSONType.Document]:
+        if path and doc.value.bsonType not in [BSONType.Array, BSONType.Document]:
             return []
     
-        while (path and doc.bsonType == BSONType.Document):
-            nxt = doc.value[path.head()]
+        while (path and doc.value.bsonType == BSONType.Document):
+            nxt = doc.value.value[path.head()]
             doc = fromMaybe(BSONElement.eoo(), nxt)
             path = path.tail()
 
-        if doc.bsonType == BSONType.EOO:
+        if doc.value.bsonType == BSONType.EOO:
             return []
     
         if not path:
             # We are at the end of the path
-            if doc.bsonType == BSONType.Array:
-                return doc.value.elements
+            if doc.value.bsonType == BSONType.Array:
+                return doc.value.value.elements
             return [doc]
     
         # We should arrive at an array or scaler here
     
-        if doc.bsonType != BSONType.Array:
+        if doc.value.bsonType != BSONType.Array:
             return [doc]
     
         return PathMatchExpression.iterArray(path, doc)
@@ -127,27 +128,27 @@ class PathMatchExpression(MatchableExpression):
     @staticmethod
     def iterArray(path: Path, doc: BSONElement) -> List[BSONElement]:
         head = path.head()
-        arr: BSONArray = doc.value
+        arr: BSONArray = doc.value.value
     
         if head.isdigit():
             # Array offset match
             def innerDispatch(restPath: Path, elm: BSONElement) -> List[BSONElement]:
-                if elm.bsonType == BSONType.EOO:
+                if elm.value.bsonType == BSONType.EOO:
                     return []
                 if not restPath:
                     return [elm]
-                if elm.bsonType == BSONType.Document:
+                if elm.value.bsonType == BSONType.Document:
                     return PathMatchExpression.iterPath(restPath, elm)
-                if elm.bsonType == BSONType.Array:
+                if elm.value.bsonType == BSONType.Array:
                     return sum(map(lambda e: PathMatchExpression.iterArray(restPath, e),
-                                   elm.value.elements),
+                                   elm.value.value.elements),
                                start = [])
                 return []
     
             return innerDispatch(path.tail(), fromMaybe(BSONElement.eoo(), arr[int(head)]))
     
         return sum(map(lambda elm: PathMatchExpression.iterPath(path, elm)
-                                    if elm.bsonType == BSONType.Document
+                                    if elm.value.bsonType == BSONType.Document
                                     else [],
                        arr.elements),
                    start = [])
@@ -186,44 +187,44 @@ def treeNOR(children: List, doc: BSONDocument) -> bool:
 @defop(MatchOperator.EQ, 1, None)
 def eq(elem: BSONElement, arg: BSONElement, _):
     cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) == 0
+    return fromMaybe(False, cmpRes >> (lambda x: x == 0))
 
 @defop(MatchOperator.LT, 1, None)
 def lt(elem: BSONElement, arg: BSONElement, _):
     cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) < 0
+    return fromMaybe(False, cmpRes >> (lambda x: x < 0))
 
 @defop(MatchOperator.GT, 1, None)
 def gt(elem: BSONElement, arg: BSONElement, _):
     cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) > 0
+    return fromMaybe(False, cmpRes >> (lambda x: x > 0))
 
 @defop(MatchOperator.LTE, 1, None)
 def lte(elem: BSONElement, arg: BSONElement, _):
     cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) <= 0
+    return fromMaybe(False, cmpRes >> (lambda x: x <= 0))
 
 @defop(MatchOperator.GTE, 1, None)
 def gte(elem: BSONElement, arg: BSONElement, _):
     cmpRes = BSONElement.compare(elem, arg)
-    return fromMaybe(None, cmpRes) >= 0
+    return fromMaybe(False, cmpRes >> (lambda x: x >= 0))
 
 @defop(MatchOperator.IN, 1, None)
 def inOp(elem: BSONElement, arg: BSONElement, _):
 
     # EOO matches NULL
-    if elem.bsonType == BSONType.EOO:
-        for aelm in arg.value.elements:
+    if elem.value.bsonType == BSONType.EOO:
+        for aelm in arg.value.value.elements:
             if aelm.bsonType == BSONType.Null:
                 return True
 
-    arr = arg.value.elements
+    arr = arg.value.value.elements
 
     for aelm in arr:
-        if aelm.bsonType == BSONType.Regex:
+        if aelm.value.bsonType == BSONType.Regex:
             # TODO: implement Regex
             continue
-        if fromMaybe(None, BSONElement.compare(elem, aelm)) == 0:
+        if fromMaybe(False, BSONElement.compare(elem, aelm) >> (lambda x: x == 0)):
             return True
 
     return False

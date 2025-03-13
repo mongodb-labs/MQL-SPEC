@@ -5,12 +5,12 @@ This is an abstraction of BSON, not it's actual serialized format
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
-from typing import Any, List
+from enum import Enum, IntEnum
+from typing import Any, List, Optional
 from fpy.data.maybe import Maybe, Just, Nothing
 
 
-class BSONType(Enum):
+class BSONType(IntEnum):
     MinKey = -1
     EOO = 0
     Number = 1
@@ -36,9 +36,13 @@ class BSONType(Enum):
 
 
 @dataclass
-class BSONElement:
+class BSONValue:
+    """
+    In the actual server codebase, we have Document / Value vs BSONDocument / BSONElement,
+    but for what it matters here, we simply need a "pure" value type without having a coupled fieldname
+    and field name will be part of the BSONElement type
+    """
     bsonType: BSONType
-    fieldName: str
     value: Any
 
     def doc(self) -> Maybe[BSONDocument]:
@@ -51,37 +55,80 @@ class BSONElement:
     def __repr__(self):
         if self.bsonType == BSONType.EOO:
             return "#<EOO>"
-        return f"#<{self.bsonType} {self.fieldName}: {self.value.__repr__()}>"
+        return f"#<{self.bsonType} {self.value.__repr__()}>"
 
     @classmethod
     def eoo(cls):
-        return cls(BSONType.EOO, "", None)
+        return cls(BSONType.EOO, None)
 
     @classmethod
-    def fromValue(cls, val, fieldName: str, typ: BSONType | None = None):
+    def fromValue(cls, val, typ: Optional[BSONType] = None):
+        if isinstance(val, BSONValue):
+            return cls(val.bsonType, val.value)
         if isinstance(val, BSONElement):
-            return cls(val.bsonType, fieldName, val.value)
+            return cls(val.value.bsonType, val.value)
         if typ is not None:
-            return cls(typ, fieldName, val)
+            return cls(typ, val)
         if isinstance(val, dict):
-            return cls(BSONType.Document, fieldName, BSONDocument.fromDict(val))
+            return cls(BSONType.Document, BSONDocument.fromDict(val))
         if isinstance(val, list):
-            return cls(BSONType.Array, fieldName, BSONArray.fromList(val))
+            return cls(BSONType.Array, BSONArray.fromList(val))
         if isinstance(val, int):
-            return cls(BSONType.Int32, fieldName, val)
+            return cls(BSONType.Int32, val)
         if isinstance(val, float):
-            return cls(BSONType.Number, fieldName, val)
+            return cls(BSONType.Number, val)
         if isinstance(val, bool):
-            return cls(BSONType.Boolean, fieldName, val)
+            return cls(BSONType.Boolean, val)
         if isinstance(val, str):
-            return cls(BSONType.String, fieldName, val)
-        return BSONElement.eoo()
+            return cls(BSONType.String, val)
+        return cls.eoo()
 
     @staticmethod
-    def compare(a, b) -> Maybe[int]:
+    def compare(a: BSONValue, b: BSONValue) -> Maybe[int]:
         if a.bsonType in [BSONType.Number, BSONType.Int32, BSONType.Int64] and b.bsonType in [BSONType.Number, BSONType.Int32, BSONType.Int64]:
             return Just(0 if a.value == b.value else (-1 if a.value < b.value else 1))
         return Nothing()
+
+
+
+@dataclass
+class BSONElement:
+    fieldName: str
+    value: BSONValue
+
+    def __repr__(self):
+        if self.value.bsonType == BSONType.EOO:
+            return "#<EOO>"
+        return f"{self.fieldName}: {self.value.__repr__()}"
+
+    @classmethod
+    def eoo(cls):
+        return cls("", BSONValue.eoo())
+
+    @classmethod
+    def fromValue(cls, val, fieldName: str, typ: BSONType | None = None):
+        return cls(fieldName, BSONValue.fromValue(val, typ))
+        # if isinstance(val, BSONElement):
+        #     return cls(val.bsonType, fieldName, val.value)
+        # if typ is not None:
+        #     return cls(typ, fieldName, val)
+        # if isinstance(val, dict):
+        #     return cls(BSONType.Document, fieldName, BSONDocument.fromDict(val))
+        # if isinstance(val, list):
+        #     return cls(BSONType.Array, fieldName, BSONArray.fromList(val))
+        # if isinstance(val, int):
+        #     return cls(BSONType.Int32, fieldName, val)
+        # if isinstance(val, float):
+        #     return cls(BSONType.Number, fieldName, val)
+        # if isinstance(val, bool):
+        #     return cls(BSONType.Boolean, fieldName, val)
+        # if isinstance(val, str):
+        #     return cls(BSONType.String, fieldName, val)
+        # return BSONElement.eoo()
+
+    @staticmethod
+    def compare(a: BSONElement, b: BSONElement) -> Maybe[int]:
+        return BSONValue.compare(a.value, b.value)
 
 
 @dataclass
