@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from abc import ABCMeta
 from typing import Iterable, List, Tuple, Sequence, Any
 from mql.base.bson import BSONDocument
+from mql.base.bsonBinary import parseDocument, takeNBytes, nBytesToInt
 from enum import Enum
 
 from fpy.parsec.parsec import parser, one, ptrans, many, many1
@@ -55,16 +56,6 @@ class OpMsg:
     opCode: OpCode
     flagBits: FlagBits
     sections: Iterable[Section]
-
-
-def takeNBytes(n) -> parser[int, Sequence[int]]:
-    return one(const(True)) * n
-
-def bytesToInt(b: Sequence[int]) -> int:
-    return int.from_bytes(bytearray(b), "little")
-
-def nBytesToInt(n) -> parser[int, int]:
-    return ptrans(takeNBytes(n), trans0(bytesToInt))
 
 @parser
 @do

@@ -1,4 +1,3 @@
-from fpy.parsec.parsec import parser
 from fpy.data.either import Left, Right, isLeft, isRight, fromLeft, fromRight, Either
 from fpy.composable.function import func
 from fpy.control.functor import fmap

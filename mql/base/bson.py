@@ -185,3 +185,8 @@ class BSONArray:
             elms.append(BSONElement.fromValue(elm, f"{idx}"))
         return cls(elms)
 
+@dataclass
+class BSONBinary:
+    size: int
+    subType: int
+    body: bytes

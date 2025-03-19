@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Sequence, Any, Tuple, Dict
 import struct
 
-from mql.base.bson import BSONType, BSONValue, BSONArray, BSONElement, BSONDocument
+from mql.base.bson import BSONType, BSONValue, BSONArray, BSONElement, BSONDocument, BSONBinary
 
 from fpy.control.monad import do
 from fpy.parsec.parsec import parser, one, ptrans, many, toSeq, neg
@@ -30,10 +30,7 @@ def takeNBytes(n) -> parser[int, Sequence[int]]:
     return toSeq(one(const(True))) * n
 
 def bytesToInt(b: Sequence[int]) -> int:
-    print(f"bytes to int: {b = }")
-    res = int.from_bytes(bytearray(b), "little")
-    print(f"{res = }")
-    return res
+    return int.from_bytes(bytearray(b), "little")
 
 def nBytesToInt(n) -> parser[int, int]:
     return ptrans(takeNBytes(n), trans0(bytesToInt))
@@ -83,14 +80,40 @@ def parseI64(payload):
 @do
 def parseStr(payload):
     with takePrefixSizedBytes(payload) as (b, rest):
-        return Right((struct.unpack("s", bytes(b))[0], rest))
+        return Right((struct.unpack(f"{len(b)}s", bytes(b))[0], rest))
 
+defTag(BSONType.Document)(parseDocument)
 
+@defTag(BSONType.Array)
+@do
+def parseArr(payload):
+    with parseDocument(payload) as (doc, rest):
+        return Right((BSONArray(doc.elements), rest))
+
+@defTag(BSONType.Boolean)
+@do
+def parseBool(payload):
+    with one(const(True))(payload) as (byte, rest):
+        return Right((byte == 1, rest))
+
+@defTag(BSONType.ObjectId)
+@do
+def parseOID(payload):
+    with takeNBytes(12)(payload) as (oid, rest):
+        return Right((bytes(oid), rest))
+
+@defTag(BSONType.Binary)
+@do
+def parseBin(payload):
+    with (nBytesToInt(4)(payload) as (bodySize, rest),
+          one(const(True))(rest) as (subType, rest),
+          takeNBytes(bodySize)(rest) as (body, rest)):
+        return Right((BSONBinary(bodySize, subType, bytes(body)), rest))
 
 if __name__ == "__main__":
     bson_bytes = [
-            12,0,0,0,
-            16, 65, 0, 1, 0, 0, 0, 
+            14,0,0,0,
+            2, 65, 0, 2, 0, 0, 0, 65, 0,
             0
             ]
     print(f"{bson_bytes}")
