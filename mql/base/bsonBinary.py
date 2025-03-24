@@ -80,7 +80,7 @@ def parseI64(payload):
 @do
 def parseStr(payload):
     with takePrefixSizedBytes(payload) as (b, rest):
-        return Right((struct.unpack(f"{len(b)}s", bytes(b))[0], rest))
+        return Right((struct.unpack(f"{len(b)}s", bytes(b))[0].decode("utf-8"), rest))
 
 defTag(BSONType.Document)(parseDocument)
 

@@ -5,12 +5,13 @@ from mql.base.bson import BSONDocument
 from mql.base.bsonBinary import parseDocument, takeNBytes, nBytesToInt
 from enum import Enum
 
-from fpy.parsec.parsec import parser, one, ptrans, many, many1
+from fpy.parsec.parsec import parser, one, ptrans, many, many1, just_nothing
 from fpy.control.monad import do
 from fpy.data.maybe import Maybe, Nothing, Just
 from fpy.data.either import Either, Left, Right
 from fpy.data.function import const
 from fpy.composable.collections import trans0
+from fpy.debug.debug import trace
 
 """
 OpMsg Packet:
@@ -90,6 +91,8 @@ def parseSections(b: Sequence[int]) -> Either[Any, Sequence[Section]]:
     work_b = b
     sections: Sequence[Section] = []
     while work_b:
+        print(f"{work_b = }")
+        print(f"{bytes(work_b) = }")
         with parseSection(work_b) as (sec, rest_b):
             if isinstance(sec, SectionBody):
                 if hasBody:
@@ -102,18 +105,19 @@ def parseSections(b: Sequence[int]) -> Either[Any, Sequence[Section]]:
 @parser
 @do
 def parseMsg(msg: Sequence[int]):
-    with (nBytesToInt(4)(msg) as (msgSize, msg),
-          nBytesToInt(4)(msg) as (reqId, msg),
-          nBytesToInt(4)(msg) as (resTo, msg),
-          nBytesToInt(4)(msg) as (rawOpCode, msg),
-          parseFlag(msg) as (flag, msg),
-          takeNBytes(msgSize - 16 - 4 - (4 if flag.checksumPresent else 0))(msg) as (sectionBytes, msg),
-          takeNBytes(4 if flag.checksumPresent else 0)(msg) as (_, rest),
-          parseSections(sectionBytes) as sections):
-        for opCode in OpCode:
-            if opCode.value == rawOpCode:
-                return Right((OpMsg(msgSize, reqId, resTo, opCode, flag, sections), rest))
-        return Left(f"Unknown op code: {rawOpCode}")
+    with (trace("msgSize: ", nBytesToInt(4)(msg)) as (msgSize, msg),
+          trace("reqId: ", nBytesToInt(4)(msg)) as (reqId, msg),
+          trace("resTo: ", nBytesToInt(4)(msg)) as (resTo, msg),
+          trace("opCode: ", nBytesToInt(4)(msg)) as (rawOpCode, msg),
+          trace("flag: ", parseFlag(msg)) as (flag, msg),
+          trace("sectionBytes: ", takeNBytes(msgSize - 16 - 4 - (4 if flag.checksumPresent else 0))(msg)) as (sectionBytes, msg),
+          trace("checkSum: ", (takeNBytes(4) if flag.checksumPresent else just_nothing(None))(msg)) as (_, rest)):
+        print(f"{rawOpCode = }")
+        with parseSections(sectionBytes) as (sections, rest):
+            for opCode in OpCode:
+                if opCode.value == rawOpCode:
+                    return Right((OpMsg(msgSize, reqId, resTo, opCode, flag, sections), rest))
+            return Left(f"Unknown op code: {rawOpCode}")
     
 
 
