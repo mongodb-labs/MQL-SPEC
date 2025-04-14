@@ -9,7 +9,7 @@ from fpy.control.monad import do
 from fpy.parsec.parsec import parser, one, ptrans, many, toSeq, neg
 from fpy.composable.collections import trans0
 from fpy.data.function import const, uncurryN
-from fpy.data.either import Either, Right, Left
+from fpy.data.either import Either, Right, Left, partitionEithers, fromRight
 from fpy.utils.placeholder import __
 from fpy.debug.debug import trace
 
@@ -38,6 +38,7 @@ def nBytesToInt(n) -> parser[int, int]:
 @do
 def takePrefixSizedBytes(payload, prefixSize = 4, sizeInclPrefix = False):
     with nBytesToInt(prefixSize)(payload) as (size, rest): 
+        print(f"Prefix {size = }")
         return takeNBytes(size - prefixSize if sizeInclPrefix else size)(rest)
 
 parseCStr = ptrans(many(toSeq(one(__ != 0))) << toSeq(one(__ == 0)), trans0(lambda lst: ''.join(map(lambda c: chr(c), lst))))
@@ -45,17 +46,28 @@ parseCStr = ptrans(many(toSeq(one(__ != 0))) << toSeq(one(__ == 0)), trans0(lamb
 @parser
 @do
 def parseDocument(b: Sequence[int]) -> Either[Any, Tuple[BSONDocument, Sequence[int]]]:
+    print(f"Parsing document: {b = }")
     with (takePrefixSizedBytes(b, sizeInclPrefix=True) as (docBytes, rest),
-          (many(toSeq(parseElement)) << EOO)(docBytes) as (elms, rest)):
+          (many(toSeq(parseElement)) << EOO)(docBytes) as (elms, docRest)):
+        if docRest:
+            return Left(f"Left over bytes: {docRest}")
         return Right((BSONDocument(elms), rest))
 
 @parser
 @do
 def parseElement(b: Sequence[int]) -> Either[Any, Tuple[BSONElement, Sequence[int]]]:
-    with (one(const(True))(b) as (tag, rest),
-          parseCStr(rest) as (fieldName, payload),
-          TAG_PARSER.get(tag, const(Left(f"Undefined Tag: {tag}")))(payload) as (val, rest)):
-            return Right((BSONElement(fieldName, val), rest))
+    with one(const(True))(b) as (tag, rest):
+        print(f"element tag: {tag}")
+        if tag != BSONType.EOO:
+            with (parseCStr(rest) as (fieldName, payload),
+                  TAG_PARSER.get(tag, const(Left(f"Undefined Tag: {tag}")))(payload) as (val, rest)):
+                print(f"{fieldName = }")
+                print(f"{val = }")
+                print(f"{rest = }")
+                return Right((BSONElement(fieldName, val), rest))
+        else:
+            return Left("EOO'd")
+
         
 @defTag(BSONType.Number)
 @do
@@ -80,7 +92,10 @@ def parseI64(payload):
 @do
 def parseStr(payload):
     with takePrefixSizedBytes(payload) as (b, rest):
-        return Right((struct.unpack(f"{len(b)}s", bytes(b))[0].decode("utf-8"), rest))
+        print(f"bytes: {b}, rest: {rest}")
+        res = struct.unpack(f"{len(b)}s", bytes(b))[0].decode("utf-8")
+        print(f"unpacked: {res}")
+        return Right((res, rest))
 
 defTag(BSONType.Document)(parseDocument)
 
@@ -110,11 +125,52 @@ def parseBin(payload):
           takeNBytes(bodySize)(rest) as (body, rest)):
         return Right((BSONBinary(bodySize, subType, bytes(body)), rest))
 
-if __name__ == "__main__":
-    bson_bytes = [
-            14,0,0,0,
-            2, 65, 0, 2, 0, 0, 0, 65, 0,
-            0
-            ]
-    print(f"{bson_bytes}")
-    print(parseDocument(bson_bytes))
+
+TAG_ENCODER = dict()
+
+def defEncoder(tag: BSONType):
+    def res(fn):
+        global TAG_ENCODER
+        TAG_ENCODER[tag] = fn
+        return fn
+    return res
+
+def dumpDocument(doc: BSONDocument) -> Either[Any, Sequence[int]]:
+    body = []
+    elems = list(map(dumpElement, doc.elements))
+    l, r = partitionEithers(elems)
+    if l:
+        return Left(l[0])
+    for elem in r:
+        body.extend(elem)
+    size = len(body) + 5
+    head = list(struct.pack("<i", size))
+    res = head + body + [0]
+    return Right(res)
+
+def dumpElement(elem: BSONElement) -> Either[Any, Sequence[int]]:
+    tag = elem.value.bsonType
+    fieldName = bytearray(elem.fieldName + "\x00", "utf-8")
+    with TAG_ENCODER.get(tag, const(Left(
+        f"Tag {tag} is not defined"
+        )))(elem.value.value) as encodedElem:
+        return Right([tag.value, *fieldName, *encodedElem])
+
+@defEncoder(BSONType.String)
+def dumpStr(s: str):
+    body = list(bytearray(s, "utf-8"))
+    clen = len(body)
+    head = list(struct.pack("<i", clen))
+    return Right(head + body)
+
+@defEncoder(BSONType.Int32)
+def dumpI32(i: int):
+    body = list(struct.pack("<i", i))
+    return Right(body)
+
+@defEncoder(BSONType.Boolean)
+def dumpBool(b: bool):
+    return Right([1 if b else 0])
+
+defEncoder(BSONType.Document)(dumpDocument)
+defEncoder(BSONType.Array)(dumpDocument)
